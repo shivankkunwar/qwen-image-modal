@@ -26,6 +26,18 @@
   CFG only turns on with `true_cfg_scale>1` AND a `negative_prompt`, and it
   doubles the cost per step.
 - Editing: pass `image=PIL.Image` (or a list) plus an instruction prompt.
+  - List order matters: the model reads images in the order given, so prompts
+    can say "the first image" / "the second image". Max 10 references.
+  - There is **no `mask=` argument**. Local edits are marked visually: draw a
+    circle/scribble on the image, or pass a black/white mask as an extra image,
+    and refer to it in the prompt.
+  - With `image=` given, omit `width`/`height` and the output follows the
+    first image's aspect ratio; `output_resolution` (default 1024) sets the size
+    and also resizes the condition images.
+  - `use_kv_cache` changes pixels slightly: same seed with it on vs off gives
+    different (equally valid) images. Keep it fixed for reproducibility.
+- Not in this pipeline: ControlNet/pose/depth conditioning, a dedicated
+  inpaint pipeline, or an upscaler (checked 2026-09-27).
 
 ```python
 pipe = QwenImage21Pipeline.from_pretrained("Qwen/Qwen-Image-2.1", torch_dtype=torch.bfloat16).to("cuda")

@@ -13,6 +13,17 @@
 **Choice: Functions.** Free-tier budget needs scale-to-zero. A Server would
 either 503 the first request or need `min_containers>=1` (GPU billed 24/7).
 
+## API = CPU front door + GPU worker (2026-09-28)
+The FastAPI app runs in its own small CPU Function (`api`, `max_containers=1`,
+`@modal.concurrent(max_inputs=50)`, tiny image without torch) and calls the GPU
+class via `.spawn()` / `.remote()`. Why: any request to a web endpoint on the
+GPU class would boot the GPU (~1 min, ~$0.03) even for a typo or a status poll.
+Jobs use `FunctionCall.from_id(id).get(timeout=0)` (results kept 7 days);
+progress goes GPU → `modal.Dict` → API, keyed by `modal.current_function_call_id()`.
+Considered: running the API on Shivank's VPS with the Modal Python client.
+Rejected for now because it needs a full Modal account token on the VPS; the
+VPS is better used for the GUI, holding only a proxy token.
+
 ## Building blocks used
 - **Image**: `modal.Image.debian_slim().uv_pip_install(...)`; `with image.imports():`
   keeps container-only imports from running locally.
@@ -23,8 +34,8 @@ either 503 the first request or need `min_containers>=1` (GPU billed 24/7).
 - **Autoscaler knobs**: `scaledown_window` (2 s–20 min, default 60 s),
   `min_containers`, `buffer_containers`, `max_containers`.
   We use `scaledown_window=120`, `max_containers=1` (caps burn rate).
-- **Web endpoint**: `@modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)`
-  – callers need Modal-Key / Modal-Secret headers.
+- **Web endpoint**: `@modal.asgi_app(requires_proxy_auth=True)` on the CPU `api`
+  function – callers need Modal-Key / Modal-Secret headers.
 
 ## Deliberately NOT used
 - **GPU memory snapshots** (`enable_memory_snapshot=True` +

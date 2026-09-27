@@ -36,8 +36,9 @@ inference). Explain Python/infra decisions briefly when making changes.
 - Download weights: `modal run qwen_image_modal.py::download_weights`
 - Generate: `modal run qwen_image_modal.py --prompt "..."`
 - Batch: `modal run qwen_image_modal.py --prompts-file prompts.txt`
-- Deploy endpoint: `modal deploy qwen_image_modal.py`
-- Local API wrapper (holds Modal keys, `POST /generate`): `node --env-file=api/.env api/server.mjs`
+- Edit images: `modal run qwen_image_modal.py --prompt "..." --images a.png,b.png`
+- Deploy API: `modal deploy qwen_image_modal.py` → https://shivankkunwar100--qwen-image-21-api.modal.run (reference: `docs/api.md`)
+- Local proxy (holds Modal keys, forwards /v1/*, /docs): `node --env-file=api/.env api/server.mjs`
 - On Shivank's Windows machine `modal` isn't on PATH: use `python -m modal ...`
 - Logs / usage: Modal dashboard → Apps → qwen-image-21; Usage page for credits
 

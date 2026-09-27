@@ -1,88 +1,98 @@
-// Tiny local API in front of the deployed Modal endpoint.
-// Keeps MODAL_KEY / MODAL_SECRET on the server so they never reach browser code.
+// Tiny local proxy in front of the deployed Modal API.
+// Adds your Modal-Key / Modal-Secret to every request so they never reach
+// browser code. Forwards /v1/*, /health and the interactive docs unchanged,
+// so new API features work here without touching this file.
 // Zero dependencies (Node 20.6+ for --env-file).
 //
 //   node --env-file=api/.env api/server.mjs
-//
-//   GET  /health
-//   POST /generate   {"prompt": "...", "width"?, "height"?, "steps"?, "seed"?, "transparent"?}
-//                    -> image/png
+//   open http://127.0.0.1:8787/docs
 
 import { createServer } from "node:http";
+import { Readable } from "node:stream";
 
-const { MODAL_ENDPOINT_URL, MODAL_KEY, MODAL_SECRET } = process.env;
+const { MODAL_API_URL, MODAL_KEY, MODAL_SECRET, CORS_ORIGIN } = process.env;
 const PORT = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? "127.0.0.1"; // localhost only: anyone who can reach this spends your credits
 
-if (!MODAL_ENDPOINT_URL || !MODAL_KEY || !MODAL_SECRET) {
-  console.error("Missing MODAL_ENDPOINT_URL / MODAL_KEY / MODAL_SECRET (see api/.env.example)");
+if (!MODAL_API_URL || !MODAL_KEY || !MODAL_SECRET) {
+  console.error("Missing MODAL_API_URL / MODAL_KEY / MODAL_SECRET (see api/.env.example)");
   process.exit(1);
 }
 
-const ALLOWED = ["prompt", "width", "height", "steps", "seed", "transparent"];
+const FORWARDED_PATHS = /^\/(v1\/|health$|docs$|openapi\.json$)/;
+const MAX_BODY_BYTES = 250 * 1024 * 1024; // 10 reference images as base64, with room to spare
+const PASS_HEADERS = ["content-type", "cache-control", "content-disposition"];
 
-function sendJson(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(body));
-}
-
-async function readJson(req) {
-  let raw = "";
+async function readBody(req) {
+  const chunks = [];
+  let size = 0;
   for await (const chunk of req) {
-    raw += chunk;
-    if (raw.length > 100_000) throw new Error("body too large");
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) throw Object.assign(new Error("request body too large"), { status: 413 });
+    chunks.push(chunk);
   }
-  return JSON.parse(raw || "{}");
+  return Buffer.concat(chunks);
 }
 
-async function generate(req, res) {
-  let body;
-  try {
-    body = await readJson(req);
-  } catch {
-    return sendJson(res, 400, { error: "body must be valid JSON" });
-  }
-  if (typeof body.prompt !== "string" || !body.prompt.trim()) {
-    return sendJson(res, 400, { error: "prompt (non-empty string) is required" });
-  }
-  // Forward only known fields so callers can't smuggle anything else through.
-  const payload = Object.fromEntries(ALLOWED.filter((k) => k in body).map((k) => [k, body[k]]));
+function corsHeaders(req) {
+  // Only for a local dev UI on another port, e.g. CORS_ORIGIN=http://localhost:3000
+  if (!CORS_ORIGIN || req.headers.origin !== CORS_ORIGIN) return {};
+  return {
+    "Access-Control-Allow-Origin": CORS_ORIGIN,
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+}
 
+async function proxy(req, res) {
+  const path = new URL(req.url, "http://x").pathname;
+  if (!FORWARDED_PATHS.test(path)) {
+    res.writeHead(404, { "Content-Type": "application/json", ...corsHeaders(req) });
+    return res.end(JSON.stringify({ error: "not found" }));
+  }
+
+  const hasBody = req.method !== "GET" && req.method !== "HEAD";
   const t0 = Date.now();
-  // fetch follows Modal's 303 "still working" redirects (sent after 150 s, e.g. on
-  // a cold start) and keeps our headers because the redirect is same-origin.
-  const upstream = await fetch(MODAL_ENDPOINT_URL, {
-    method: "POST",
+  // fetch follows Modal's 303 "still working" redirects (sent after 150 s, e.g.
+  // during a cold start) and keeps our headers because they're same-origin.
+  const upstream = await fetch(new URL(req.url, MODAL_API_URL), {
+    method: req.method,
     headers: {
-      "Content-Type": "application/json",
+      "Content-Type": req.headers["content-type"] ?? "application/json",
       "Modal-Key": MODAL_KEY,
       "Modal-Secret": MODAL_SECRET,
     },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(15 * 60 * 1000), // matches the Modal function timeout
+    body: hasBody ? await readBody(req) : undefined,
+    signal: AbortSignal.timeout(20 * 60 * 1000), // matches the GPU function timeout
   });
 
-  if (!upstream.ok) {
-    const detail = await upstream.text();
-    console.error(`Modal ${upstream.status}: ${detail}`);
-    return sendJson(res, upstream.status, { error: "generation failed", status: upstream.status, detail });
+  const headers = { ...corsHeaders(req) };
+  for (const name of PASS_HEADERS) {
+    const value = upstream.headers.get(name);
+    if (value) headers[name] = value;
   }
-
-  const png = Buffer.from(await upstream.arrayBuffer());
-  console.log(`generated ${png.length} bytes in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  res.writeHead(200, { "Content-Type": "image/png", "Content-Length": png.length });
-  res.end(png);
+  res.writeHead(upstream.status, headers);
+  console.log(`${req.method} ${req.url} -> ${upstream.status} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+  if (upstream.body) Readable.fromWeb(upstream.body).pipe(res);
+  else res.end();
 }
 
 createServer(async (req, res) => {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, corsHeaders(req));
+    return res.end();
+  }
   try {
-    if (req.method === "GET" && req.url === "/health") return sendJson(res, 200, { ok: true });
-    if (req.method === "POST" && req.url === "/generate") return await generate(req, res);
-    sendJson(res, 404, { error: "not found" });
+    await proxy(req, res);
   } catch (err) {
     console.error(err);
-    if (!res.headersSent) sendJson(res, 502, { error: String(err.message ?? err) });
+    if (!res.headersSent) {
+      res.writeHead(err.status ?? 502, { "Content-Type": "application/json", ...corsHeaders(req) });
+      res.end(JSON.stringify({ error: String(err.message ?? err) }));
+    } else {
+      res.end();
+    }
   }
 }).listen(PORT, HOST, () => {
-  console.log(`Qwen image API on http://${HOST}:${PORT}  (POST /generate)`);
+  console.log(`Qwen image API proxy on http://${HOST}:${PORT}  (docs: /docs)`);
 });
