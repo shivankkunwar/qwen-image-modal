@@ -1,0 +1,5 @@
+qwen_outputs/
+__pycache__/
+.venv/
+*.png
+.env
